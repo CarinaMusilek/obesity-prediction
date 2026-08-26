@@ -1,0 +1,253 @@
+---
+title: "Predicting Obesity with Tree-based Methods"
+author: "Carina Musilek"
+date: "2025-01-24"
+output:
+  html_document: default
+  pdf_document: default
+  word_document: default
+---
+
+```{r, message = FALSE, warning = FALSE}
+library(rpart)
+library(rpart.plot)
+library(caret)
+library(randomForest)
+library(ROCR)
+library(Metrics)
+library(gbm)
+library(tidyverse)
+```
+
+# 1. Dataset Selection
+The dataset is from a survey on obesity with 2111 observations. The goal is to find a way to predict obesity based on the given covariables. Four explanatory variables were omitted due to improper explanation of the encoding. If necessary, the variables were converted to factors. 
+
+The dataset now consists of the following variables:
+
+- **Gender**: Gender
+- **Age**: Age
+- **Height** : in metres
+- **Weight** : in kgs
+- **family_history** : Has a family member suffered or suffers from overweight?
+- **FAVC** : Do you eat high caloric food frequently?
+- **NCP** : How many main meals do you have daily?
+- **CAEC** : Do you eat any food between meals?
+- **SMOKE** : Do you smoke?
+- **SCC** : Do you monitor the calories you eat daily?
+- **CALC** : How often do you drink alcohol?
+- **MTRANS** : Which transportation do you usually use?
+- **y** : Is the person obese? (variable of interest)
+
+
+```{r}
+data <- read.csv("data/Obesity prediction.csv")
+data <- data[ , -c(7, 11, 13, 14)]
+
+data$Gender <- as.factor(data$Gender)
+data$family_history <- as.factor(data$family_history)
+data$FAVC <- as.factor(data$FAVC)
+data$CAEC <- factor(data$CAEC, levels = c("no", "Sometimes", "Frequently", "Always"), ordered = TRUE)
+data$SMOKE <- as.factor(data$SMOKE)
+data$SCC <- as.factor(data$SCC)
+data$CALC <- factor(data$CALC, levels =c("no", "Sometimes", "Frequently", "Always"), ordered = TRUE)
+data$MTRANS <- as.factor(data$MTRANS)
+data$Obesity <- factor(data$Obesity, levels = c("Insufficient_Weight", "Normal_Weight", "Overweight_Level_I", 
+                                                "Overweight_Level_II", "Obesity_Type_I", "Obesity_Type_II", 
+                                                "Obesity_Type_III"), ordered = TRUE)
+head(data)
+```
+
+
+# 2. Exploratory Data Analysis
+
+To begin with, a bar chart of the variable Obesity is plotted. This variable initially hat 7 values ranging from "insufficient weight" to "obesity type III". However, for simplicity reasons, it was summarized in a variable y which is 1 if the person is obese (obesity level I to III, here depicted in orange) and 0 otherwise (insufficient weight to overweight level II, here green). 
+
+```{r}
+plot(data$Obesity, main = "Barplot of Obesity", cex.names = 0.8, 
+     col = c(rep( "forestgreen", times = 4), rep("darkorange", times = 3)))
+```
+
+```{r}
+y <- ifelse(data$Obesity %in% c("Insufficient_Weight", "Normal_Weight", 
+                           "Overweight_Level_I", "Overweight_Level_II"), 0, 1)
+y <- factor(y)
+data <- cbind(data[ , -length(data)], y)
+```
+
+The next plot shows the relationship between height and weight and the group of the data point (obese or not obese). The two groups seem to be almost linearly seperable which is due to the fact that y is calculated from exactly those covariables. The variables weight and height are therefore not considered in the further analysis since obesity is diagnosed based on the body mass index which is calculated using these exact covariables. When fitting a decision tree, these two would dominate the most important nodes and effects of other covariables would go unseen. 
+
+```{r}
+plot(data$Height, data$Weight, col = ifelse(as.numeric(data$y) == 1, "darkorange", "forestgreen"))
+legend("topleft", legend = c("not obese", "obese"), col = c("forestgreen", "darkorange"), pch = 16)
+```
+
+```{r}
+ind <- c(which(colnames(data) == "Weight"), which(colnames(data) == "Height"))
+data <- data[ ,-ind]
+```
+
+# 3. Model Implementation
+
+Before fitting the models, the data is split into a training and a test set with the training set containing 80 % of the data in order to evaluate the models' performance afterwards. 
+
+```{r}
+set.seed(123)
+ind_train <- sample(x = 1:nrow(data), size = nrow(data)*0.8)
+train <- data[ind_train,]
+test <- data[-ind_train,]
+```
+
+## 3.1 Decision Tree
+```{r}
+tree.fit <- rpart(y ~., data = train, method = "class")  
+prp(tree.fit) 
+printcp(tree.fit)
+```
+
+A decision tree is fitted to classify the data. Only 6 out of 10 covariables are actually used in the construction. The full tree is plotted above, however, family history and the number of daily main meals NCP seem to be important factors. The function printcp shows that the full tree has the lowest value of xerror. Therefore, no pruning is performed. 
+
+```{r}
+predictions_tree <- predict(tree.fit, newdata = test, type = 'class')
+confusionMatrix(test$y, predictions_tree)
+```
+
+The tree's accuracy is 0.818 which is a rather good value. The p-value [Acc > NIR] is smaller than the significance level 0.05 which is also a good sign. Furthermore, one can take a look at the kappa value. A value below 0 would indicate that randomly assigning the groups is better than the output of the decision tree. A value between 0.5 and 0.7 is considered a good value. For this decision tree, kappa equals 0.6358. Therefore, the decision tree seems to perform not that poorly on the test set.  
+
+## 3.2 Bagging
+
+In order to make the results of 3.1 more reliable, more decision trees are fitted using the bagging method. For this model 500 trees are fitted and all 10 covariables are tried at each split. 
+
+```{r}
+bag.model<- randomForest(y ~ ., data = train, mtry = ncol(train) - 1)
+bag.model
+
+predictions_bag <- predict(bag.model, newdata = test, type = 'class')
+confusionMatrix(test$y, predictions_bag)
+```
+
+The accuracy on the test set is now 0.8794 which is better than the individual decision tree. The p-value is again very low and kappa equals 0.7565 which is a good value. The bagging model seems to predict the classes obese and not obese rather well.
+
+```{r}
+varImpPlot(bag.model)
+```
+
+The importance plot shows that Age is the most important covariable in the dataset, followed by NCP and family_history. Having one especially strong predictor might lead to high correlation between the trees in the ensemble. Therefore, bagging might in this case not provide a large reduction in variance compared to the individual tree. A random forest is fitted to decorrelate the trees in the ensemble which will hopefully improve the model. 
+
+## 3.3 Random Forest
+
+For the random forest, again 500 trees are fitted. However, at each split not all but only a previously determined part of the covariables is tried. In R this parameter is set using mtry. Note that the default value for mtry for classification is $\sqrt{p}$ where p is the number of predictors. In this case, 3 predictors are tried at each split.
+
+```{r}
+forest.fit <- randomForest(y ~. , data = train, type = "classification")
+print(forest.fit)
+
+predictions_forest <- predict(forest.fit, newdata = test, type = 'class')
+confusionMatrix(test$y, predictions_forest)
+```
+
+The accuracy of the random forest model is 0.8865 which is an improvement over the bagging model. Kappa is 0.7722 which is again a good sign for the fit. 
+
+```{r}
+varImpPlot(forest.fit)
+```
+
+Again, age is the most important variable for the model, followed by family_history and NCP. 
+
+
+```{r}
+# Plot the OOB error rate
+plot(forest.fit, main = "OOB Error Rate vs. Number of Trees", 
+     col = c(1, "forestgreen", "darkorange"), lty = 1)
+
+# Add a legend
+legend("topright", 
+       legend = c("Overall OOB Error", "Class 0 Error", "Class 1 Error"), 
+       col = c(1, "forestgreen", "darkorange"), lty = 1)
+```
+
+For a random forest, the OOB error rate can be plotted. Note that it decreases with the number of trees but is always higher for y = 0 (the not obese class). 
+
+
+## 3.4 Boosting
+
+Finally, a boosting model is fitted to the data. 
+```{r}
+gbm_ntrees <- 200
+gbm_shrinkage <-  0.05
+gbm_depth <- 4
+gbm_minobs <- 15
+
+g <- gbm.fit(x = train[ , 1:(length(train) - 1)], 
+             y = as.numeric(train$y) - 1, 
+             distribution = "bernoulli", 
+             n.trees = gbm_ntrees, 
+             shrinkage = gbm_shrinkage,
+             interaction.depth = gbm_depth, 
+             n.minobsinnode = gbm_minobs)
+
+boost.test <- predict.gbm(object = g,newdata = test[ , 1:(length(train) - 1)], gbm_ntrees)
+pred_boost <- ifelse(boost.test > 0.5, 1, 0)
+
+confusionMatrix(test$y, factor(pred_boost))
+```
+
+
+The accuracy on the test data is 0.8511 and the value of kappa 0.6957 which is good but not as good as the random forest model. However, these values might be significantly improved by the right choice of tuning parameters, for example through cross validation. 
+
+# 4. Model Comparison
+
+## 4.1 Receiver Operating Characteristic (ROC) Curve
+From the outputs in section 3 it can be seen that the random forest model has the highest accuracy on the test data. However, there are other options to compare classification models, for example the Receiver Operating Characteristic (ROC) Curve where the false positive rate is plotted against the true positive rate. A diagonal line with intercept 0 and slope 1 (here in grey) shows the ROC curve of a model that randomly assigns groups. The better the model the bigger the distance between the ROC curve and this line. 
+
+```{r}
+# decision tree
+ROCRpred <- prediction(as.numeric(predictions_tree) - 1, test$y)
+ROCRperf <- performance(ROCRpred, measure = "tpr", x.measure = "fpr")
+plot(ROCRperf, lwd=2, col = "green3", main = "ROC Curves")
+
+# bagging
+ROCRpred1 <- prediction(as.numeric(predictions_bag) - 1, test$y)
+ROCRperf1 <- performance(ROCRpred1, measure = "tpr", x.measure = "fpr")
+plot(ROCRperf1,  lwd=2, col = "yellow2", add = TRUE)
+
+# random forest
+ROCRpred2 <- prediction(as.numeric(predictions_forest) - 1, test$y)
+ROCRperf2 <- performance(ROCRpred2, measure = "tpr", x.measure = "fpr")
+plot(ROCRperf2, lwd=2, col = "orange2", add = TRUE)
+
+# boosting
+ROCRpred3 <- prediction(as.numeric(pred_boost) - 1, test$y)
+ROCRperf3 <- performance(ROCRpred3, measure = "tpr", x.measure = "fpr")
+plot(ROCRperf3, lwd=2, col = "blue3", add = TRUE)
+
+abline(0, 1, add = TRUE, col = "grey")
+
+legend(x = "bottomright", legend = c("decision tree", "bagging", "random forest", "boosting"),
+       col = c("green2", "yellow2", "orange2", "blue3"), lty = 1)
+```
+
+In this case, the decision tree (green) seems to have the worst ROC curve since it is the closest to the grey line. Now the AUC is computed for each model. 
+
+## 4.2 Area under the Curve
+The area under the ROC curve (AUC) is also a measure for model performance which is considered to be more adequate for judging model performance than accuracy. The closer the AUC is to one, the better is the model. 
+
+```{r}
+auc <- performance(ROCRpred, measure = "auc")
+auc <- auc@y.values[[1]]
+auc1 <- performance(ROCRpred1, measure = "auc")
+auc1 <- auc1@y.values[[1]]
+auc2 <- performance(ROCRpred2, measure = "auc")
+auc2 <- auc2@y.values[[1]]
+auc3 <- performance(ROCRpred3, measure = "auc")
+auc3 <- auc3@y.values[[1]]
+
+cbind("decision tree" = auc, "bagging" = auc1, "random forest" = auc2, "boosting" = auc3)
+
+```
+
+The individual decision tree has the smallest AUC and is therefore not as good as the other models. In this example, random forest has the largest AUC value and therefore seems to be the best model for the data at hand. The AUC value as well as the ROC curve of the boosting model have to be treated with caution since the performance of a boosting model largely depends on the tuning parameters which were not found with cross validation for this paper. 
+
+# 5. Conclusion
+
+The aim of this project was to find a classifier to determine whether a person is obese or not based on characteristics such as family history, age, gender and eating habits. To do this only tree based methods were used. A decision tree, a bagging model, a random forest and finally a boosting model were fitted to the data and their performance was evaluated on a test set finding that random forest had the highest accuracy among the fitted models. Finally, the models were compared using ROC curves and the AUC measure. Random forest was still found to be the best model for the data at hand since its AUC is the closest to 1. 
+
